@@ -786,6 +786,10 @@
         }
 
         const transcript = String(activeCallTranscriptState.transcriptText || '').trim();
+        const status = String(activeCallTranscriptState.callStatus || '').trim().toLowerCase();
+        const transcriptFallback = CALL_TERMINAL_STATUSES.has(status)
+          ? 'Transcript is not available yet. Waiting for ElevenLabs post-call transcript payload; it can take a short time after completion.'
+          : 'Transcript not available yet. Keep the call running and speak with the agent.';
         const lines = [
           `CallSid: ${callSid}`,
           `To: ${activeCallTranscriptState.to || '-'}`,
@@ -797,7 +801,7 @@
           `Message Count: ${Number(activeCallTranscriptState.messageCount || 0)}`,
           '',
           'Transcript:',
-          transcript || 'Transcript not available yet. Keep the call running and speak with the agent.'
+          transcript || transcriptFallback
         ];
 
         panel.textContent = lines.join('\n');

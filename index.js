@@ -1338,6 +1338,7 @@ function extractCallSid(payload = {}) {
     payload?.conversation?.call_sid,
     payload?.data?.phone_call?.call_sid,
     payload?.data?.metadata?.phone_call?.call_sid,
+    payload?.data?.conversation_initiation_client_data?.dynamic_variables?.system__call_sid,
     ...nestedMatches
   ];
 
@@ -1375,6 +1376,8 @@ function extractConversationId(payload = {}, query = {}) {
     payload?.chat_id,
     payload?.conversation?.id,
     payload?.conversation?.conversation_id,
+    payload?.data?.conversation_id,
+    payload?.data?.id,
     payload?.meta?.conversationId,
     payload?.metadata?.conversationId,
     query?.conversationId,
@@ -1415,6 +1418,10 @@ function extractCallerPhone(payload = {}, query = {}) {
     payload?.customer_phone,
     payload?.from,
     payload?.conversation?.from_number,
+    payload?.data?.metadata?.phone_call?.external_number,
+    payload?.data?.metadata?.phone_call?.agent_number,
+    payload?.data?.conversation_initiation_client_data?.dynamic_variables?.system__called_number,
+    payload?.data?.conversation_initiation_client_data?.dynamic_variables?.system__caller_id,
     payload?.data?.user_id,
     payload?.data?.phone_call?.external_number,
     payload?.data?.metadata?.phone_call?.external_number,
@@ -1474,6 +1481,39 @@ async function lookupActiveCallSidViaTwilio(callerPhone) {
     });
 
     return '';
+  }
+
+  return '';
+}
+
+function findRecentCallSidByPhoneFromLog(callerPhone = '') {
+  const normalizedCallerPhone = normalizePhone(callerPhone);
+  if (!normalizedCallerPhone) {
+    return '';
+  }
+
+  const targetCandidates = new Set(getPhoneLookupCandidates(normalizedCallerPhone));
+  const entries = readConversationLog(Math.max(500, Math.min(CONVERSATION_LOG_RETENTION_LIMIT, 3000)));
+
+  for (const entry of entries) {
+    if (String(entry?.source || '').trim() !== 'twilio' || String(entry?.event || '').trim() !== 'call-status') {
+      continue;
+    }
+
+    const callSid = String(entry?.callSid || '').trim();
+    if (!callSid) {
+      continue;
+    }
+
+    const to = normalizePhone(String(entry?.to || entry?.payload?.To || '').trim());
+    const from = normalizePhone(String(entry?.from || entry?.payload?.From || '').trim());
+    const matchesTarget = [to, from]
+      .flatMap((value) => getPhoneLookupCandidates(value))
+      .some((candidate) => targetCandidates.has(candidate));
+
+    if (matchesTarget) {
+      return callSid;
+    }
   }
 
   return '';
@@ -1636,6 +1676,19 @@ function extractTranscriptSnippet(payload = {}) {
     }
   }
 
+  const normalizedMessages = extractTranscriptMessages(payload);
+  if (normalizedMessages.length > 0) {
+    const lines = normalizedMessages.map((item) => {
+      const role = String(item?.role || 'participant').trim();
+      const text = normalizeTranscriptText(item?.text || '');
+      return text ? `${role}: ${text}` : '';
+    }).filter(Boolean);
+
+    if (lines.length > 0) {
+      return lines.join('\n').slice(0, 4000);
+    }
+  }
+
   const messageCandidates = [
     payload?.messages,
     payload?.conversation?.messages,
@@ -1666,12 +1719,101 @@ function extractTranscriptSnippet(payload = {}) {
   return '';
 }
 
+function normalizeTranscriptRole(rawRole = '') {
+  const normalized = String(rawRole || '').trim().toLowerCase();
+  if (!normalized) {
+    return 'participant';
+  }
+
+  if (['assistant', 'agent', 'ai', 'bot'].includes(normalized)) {
+    return 'assistant';
+  }
+
+  if (['user', 'caller', 'customer', 'human'].includes(normalized)) {
+    return 'user';
+  }
+
+  return normalized;
+}
+
+function normalizeTranscriptMessageList(list = []) {
+  if (!Array.isArray(list) || list.length === 0) {
+    return [];
+  }
+
+  return list
+    .map((item) => {
+      if (typeof item === 'string') {
+        const text = normalizeTranscriptText(item);
+        return text
+          ? {
+            role: 'participant',
+            text
+          }
+          : null;
+      }
+
+      if (!item || typeof item !== 'object') {
+        return null;
+      }
+
+      const role = normalizeTranscriptRole(item?.role || item?.speaker || item?.source || '');
+      const text = normalizeTranscriptText(
+        item?.text
+        || item?.content
+        || item?.message
+        || item?.original_message
+        || item?.transcript
+        || ''
+      );
+
+      return text
+        ? {
+          role,
+          text
+        }
+        : null;
+    })
+    .filter(Boolean);
+}
+
+function extractConversationHistoryMessages(payload = {}) {
+  const rawCandidates = [
+    payload?.data?.conversation_initiation_client_data?.dynamic_variables?.system__conversation_history,
+    payload?.data?.metadata?.system__conversation_history,
+    payload?.data?.metadata?.conversation_history
+  ];
+
+  for (const rawCandidate of rawCandidates) {
+    const raw = String(rawCandidate || '').trim();
+    if (!raw) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(raw);
+      const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+      const normalized = normalizeTranscriptMessageList(entries);
+      if (normalized.length > 0) {
+        return normalized;
+      }
+    } catch (_err) {
+      // Ignore malformed dynamic conversation history payload.
+    }
+  }
+
+  return [];
+}
+
 function extractTranscriptMessages(payload = {}) {
   const messageCandidates = [
     payload?.messages,
     payload?.conversation?.messages,
     payload?.data?.messages,
     payload?.data?.transcript,
+    payload?.data?.analysis?.transcript,
+    payload?.data?.analysis?.transcript?.messages,
+    payload?.data?.analysis?.conversation?.messages,
     payload?.transcript,
     payload?.transcript?.messages,
     payload?.turns,
@@ -1683,22 +1825,16 @@ function extractTranscriptMessages(payload = {}) {
       continue;
     }
 
-    const normalized = list
-      .map((item) => {
-        const role = String(item?.role || item?.speaker || item?.source || 'participant').trim();
-        const text = normalizeTranscriptText(item?.text || item?.content || item?.message || '');
-        return text
-          ? {
-            role,
-            text
-          }
-          : null;
-      })
-      .filter(Boolean);
+    const normalized = normalizeTranscriptMessageList(list);
 
     if (normalized.length > 0) {
       return normalized;
     }
+  }
+
+  const historyMessages = extractConversationHistoryMessages(payload);
+  if (historyMessages.length > 0) {
+    return historyMessages;
   }
 
   return [];
@@ -2686,6 +2822,10 @@ async function handleElevenLabsWebhook(req, res, receivedVia = '/elevenlabs/webh
     || findActiveCallSidByPhone(callerPhone)
     || findSingleActiveTransferCandidateCallSid();
 
+  if (!callSid && callerPhone) {
+    callSid = findRecentCallSidByPhoneFromLog(callerPhone);
+  }
+
   if (callSid && callerPhone) {
     rememberActiveCall(callerPhone, callSid);
     upsertActiveCallMeta({ callSid, to: callerPhone, status: 'in-progress' });
@@ -3325,8 +3465,37 @@ app.get('/tester/recent-events', (_req, res) => {
   res.status(200).json({ events: recentEvents });
 });
 
-const port = Number(process.env.PORT || 3000);
-app.listen(port, () => {
-  checkConfig();
-  console.log(`Marketing Voice Agent running on port ${port}`);
-});
+const requestedPort = Number(process.env.PORT || 3000);
+
+function startServer(initialPort) {
+  let activePort = Number(initialPort || 3000);
+  const maxAttempts = 5;
+  let attempts = 0;
+
+  const tryListen = () => {
+    attempts += 1;
+    const server = app.listen(activePort, () => {
+      checkConfig();
+      console.log(`Marketing Voice Agent running on port ${activePort}`);
+      if (activePort !== requestedPort) {
+        console.log(`[startup] Requested port ${requestedPort} was unavailable. Using fallback port ${activePort}.`);
+      }
+    });
+
+    server.on('error', (error) => {
+      if (error?.code === 'EADDRINUSE' && attempts < maxAttempts) {
+        console.warn(`[startup] Port ${activePort} is already in use. Trying ${activePort + 1}...`);
+        activePort += 1;
+        setTimeout(tryListen, 150);
+        return;
+      }
+
+      console.error('[startup] Failed to start server:', error?.message || error);
+      process.exit(1);
+    });
+  };
+
+  tryListen();
+}
+
+startServer(requestedPort);
