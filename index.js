@@ -2211,7 +2211,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.get('/tester', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'tester.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.get('/tester/config-status', async (req, res) => {
@@ -2792,7 +2792,7 @@ app.get('/tester/start-call', handleTesterStartCall);
 app.post('/tester/launch-outbound', handleTesterStartCall);
 app.get('/tester/launch-outbound', handleTesterStartCall);
 
-app.get('/', (_req, res) => {
+app.get('/_meta/endpoints', (_req, res) => {
   res.status(200).json({
     name: 'Marketing Voice Agent',
     endpoints: [
@@ -2805,6 +2805,10 @@ app.get('/', (_req, res) => {
       '/tester/agent-playbook'
     ]
   });
+});
+
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 async function handleElevenLabsWebhook(req, res, receivedVia = '/elevenlabs/webhook') {
